@@ -101,52 +101,6 @@ def get_geolocation(ip: str) -> Optional[Tuple[float, float]]:
         print(f"Error geolocating {ip}: {e}")
         return None
 
-def plot_traceroute(coords: List[Tuple[float, float]], target: str, your_location: Optional[Tuple[float, float]] = None):
-    """
-    Plot the traceroute coordinates on a map with the given style
-    """
-    if not coords:
-        print("No coordinates to plot")
-        return
-
-    # Create figure with dark background
-    fig = plt.figure(figsize=(12, 8), facecolor='black')
-    ax = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree())
-
-    # Customize map colors
-    ax.set_facecolor('#0a0a1a')  # Space-like dark blue
-    ax.add_feature(cfeature.LAND, color='#2d2d4d')  # Dark land
-    ax.add_feature(cfeature.OCEAN, color='#111133')  # Deep ocean
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.5, edgecolor='#aaaaaa')
-    ax.add_feature(cfeature.BORDERS, linestyle=':', edgecolor='#666666')
-
-    ax.set_global()  # Forces the map to show the entire world
-
-    # Plot traceroute path with glowing effect
-    lats, lons = zip(*coords)
-    ax.plot(lons, lats, '-', color='cyan', linewidth=1, alpha=0.5, transform=ccrs.Geodetic())
-
-    # Add glowing markers
-    for i, (lat, lon) in enumerate(coords):
-        # Make the start and end points larger
-        size = 12 if i == 0 or i == len(coords)-1 else 8
-        ax.plot(lon, lat, 'o', color='white', markersize=size+2, transform=ccrs.Geodetic())
-        ax.plot(lon, lat, 'o', color='cyan', markersize=size, transform=ccrs.Geodetic())
-
-    # Add labels for start and end points
-    if your_location:
-        ax.text(your_location[1], your_location[0], 'You', color='white', ha='right', va='bottom', transform=ccrs.Geodetic())
-    ax.text(lons[-1], lats[-1], target, color='white', ha='left', va='bottom', transform=ccrs.Geodetic())
-
-    # Title
-    plt.title(f'Traceroute to {target}', color='white', pad=20)
-
-    # Save or show
-    output_file = f'traceroute_{target}.png'
-    plt.savefig(output_file, dpi=600, bbox_inches='tight', facecolor=fig.get_facecolor())
-    print(f"Map saved to {output_file}")
-    plt.show()
-
 def get_your_location() -> Optional[Tuple[float, float]]:
     """Try to determine the user's location using a public IP service"""
     try:
@@ -156,9 +110,6 @@ def get_your_location() -> Optional[Tuple[float, float]]:
     except Exception as e:
         print(f"Could not determine your location: {e}")
         return None
-
-# Import your existing traceroute functions here (keep all the original imports and functions)
-# ... [all your existing imports and functions] ...
 
 class TracerouteWorker(QThread):
     update_signal = pyqtSignal(list, object, str)  # coords, your_location, target_ip
