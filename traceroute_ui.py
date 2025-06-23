@@ -14,6 +14,46 @@ from typing import List, Tuple, Optional
 import subprocess
 import requests
 import re
+import json
+from datetime import datetime, timedelta
+import os
+
+CACHE_FILE = 'ip_geolocation_cache.json'
+CACHE_LIFESPAN = timedelta(days=30)
+
+your_location_cache = None
+
+def load_cache():
+    """Load the cache from JSON file or return empty dict if file doesn't exist"""
+    if not os.path.exists(CACHE_FILE):
+        return {}
+    
+    with open(CACHE_FILE, 'r') as f:
+        try:
+            cache = json.load(f)
+            # Convert string timestamps back to datetime objects
+            for ip in cache:
+                cache[ip]['timestamp'] = datetime.fromisoformat(cache[ip]['timestamp'])
+            return cache
+        except (json.JSONDecodeError, KeyError):
+            return {}
+
+def save_cache(cache):
+    """Save the cache to JSON file"""
+    # Convert datetime objects to ISO format strings for JSON serialization
+    temp_cache = {}
+    for ip in cache:
+        temp_cache[ip] = {
+            'value': cache[ip]['value'],
+            'timestamp': cache[ip]['timestamp'].isoformat()
+        }
+    
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(temp_cache, f)
+
+def is_cache_valid(cache_entry):
+    """Check if a cache entry is still valid"""
+    return datetime.now() - cache_entry['timestamp'] < CACHE_LIFESPAN
 
 def run_traceroute(target: str) -> List[str]:
     """
@@ -81,21 +121,42 @@ def extract_ips(traceroute_output: List[str]) -> List[str]:
 
 def get_geolocation(ip: str) -> Optional[Tuple[float, float]]:
     """
-    Get latitude and longitude for an IP address using ip-api.com
+    Get latitude and longitude for an IP address using ip-api.com with JSON cache
     Returns (lat, lon) or None if lookup fails
     """
     try:
         # Skip private IPs
         if ip.startswith(('10.', '192.168.', '172.16.', '169.254.')):
             return None
-            
+
+        # Load cache
+        cache = load_cache()
+        
+        # Check cache first
+        if ip in cache and is_cache_valid(cache[ip]):
+            return cache[ip]['value']
+        
+        # Not in cache or expired, make API request
         response = requests.get(f'http://ip-api.com/json/{ip}?fields=status,message,lat,lon', timeout=5)
         data = response.json()
         
         if data.get('status') == 'success':
-            return (data['lat'], data['lon'])
+            result = (data['lat'], data['lon'])
+            # Update cache
+            cache[ip] = {
+                'value': result,
+                'timestamp': datetime.now()
+            }
+            save_cache(cache)
+            return result
         else:
             print(f"Could not geolocate {ip}: {data.get('message', 'Unknown error')}")
+            # Cache the failure (None result) to avoid repeated lookups
+            cache[ip] = {
+                'value': None,
+                'timestamp': datetime.now()
+            }
+            save_cache(cache)
             return None
     except Exception as e:
         print(f"Error geolocating {ip}: {e}")
@@ -103,10 +164,15 @@ def get_geolocation(ip: str) -> Optional[Tuple[float, float]]:
 
 def get_your_location() -> Optional[Tuple[float, float]]:
     """Try to determine the user's location using a public IP service"""
+    global your_location_cache
     try:
-        response = requests.get('https://ipapi.co/json/', timeout=5)
-        data = response.json()
-        return (data['latitude'], data['longitude'])
+        if your_location_cache is not None:
+            return your_location_cache
+        response = requests.get('https://api.ipify.org', timeout=5)
+        print(response.text)
+        data = get_geolocation(response.text)
+        your_location_cache = (data[0], data[1])
+        return (data[0], data[1])
     except Exception as e:
         print(f"Could not determine your location: {e}")
         return None
