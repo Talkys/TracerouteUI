@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TracerouteUI</title>
+    <!-- Local Leaflet CSS -->
+    <link rel="stylesheet" href="static/leaflet.css"/>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            background-color: #0b0f19;
+            color: #d1d5db;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        header {
+            padding: 12px 20px;
+            background: #111827;
+            border-bottom: 1px solid #1f2937;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        input[type="text"] {
+            background: #1f2937;
+            border: 1px solid #374151;
+            color: #fff;
+            padding: 8px 14px;
+            border-radius: 4px;
+            font-size: 14px;
+            width: 280px;
+        }
+        input[type="text"]:focus { outline: none; border-color: #38bdf8; }
+        button {
+            background: #0284c7;
+            color: #fff;
+            border: none;
+            padding: 8px 18px;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        button:hover { background: #0369a1; }
+        button:disabled { background: #475569; cursor: not-allowed; }
+        #status { font-size: 13px; color: #9ca3af; margin-left: 10px; }
+
+        .main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        #map {
+            flex: 1.5;
+            height: 100%;
+            /* Map background acts as the ocean color */
+            background: #080c14;
+        }
+        .sidebar {
+            flex: 1;
+            background: #0f172a;
+            border-left: 1px solid #1e293b;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .sidebar-title {
+            padding: 10px 15px;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            background: #1e293b;
+            color: #94a3b8;
+        }
+        .log-table {
+            flex: 1;
+            overflow-y: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        th, td {
+            text-align: left;
+            padding: 7px 10px;
+            border-bottom: 1px solid #1e293b;
+        }
+        th { background: #131d31; color: #94a3b8; position: sticky; top: 0; }
+        tr:hover { background: #1e293b; }
+        .badge {
+            display: inline-block;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-size: 11px;
+            background: #334155;
+        }
+        .badge.origin { background: #6366f1; color: #fff; }
+        .badge.dest { background: #10b981; color: #fff; }
+
+        .leaflet-container { background: #080c14 !important; }
+        .hop-marker {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #0284c7;
+            color: white;
+            border: 2px solid #38bdf8;
+            border-radius: 50%;
+            font-size: 11px;
+            font-weight: bold;
+            box-shadow: 0 0 10px rgba(56, 189, 248, 0.7);
+        }
+        .hop-marker.origin {
+            background: #6366f1;
+            border-color: #a5b4fc;
+            box-shadow: 0 0 10px rgba(99, 102, 241, 0.8);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <span style="font-weight: bold; color: #38bdf8;">TracerouteUI</span>
+        <input type="text" id="targetInput" placeholder="e.g. 1.1.1.1 or github.com" value="1.1.1.1">
+        <button id="traceBtn" onclick="startTrace()">Trace Route</button>
+        <span id="status">Ready</span>
+    </header>
+
+    <div class="main">
+        <div id="map"></div>
+        <div class="sidebar">
+            <div class="sidebar-title">Live Hop Telemetry</div>
+            <div class="log-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Hop</th>
+                            <th>IP</th>
+                            <th>Host</th>
+                            <th>RTT</th>
+                            <th>Geo Location</th>
+                        </tr>
+                    </thead>
+                    <tbody id="hopsBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Local Leaflet JS -->
+    <script src="static/leaflet.js"></script>
+    <script>
+        // 1. Initialize map (bounded to prevent panning into empty space)
+        const map = L.map('map', {
+            center: [20, 0],
+            zoom: 2,
+            minZoom: 1,
+            maxZoom: 7, // Max zoom 7 is optimal for city-level IP data
+            maxBounds: [[-90, -180], [90, 180]],
+            maxBoundsViscosity: 1.0
+        });
+
+        // 2. Load and render local vector GeoJSON base map
+        fetch('static/world.geojson')
+            .then(res => res.json())
+            .then(geojsonData => {
+                L.geoJSON(geojsonData, {
+                    style: {
+                        fillColor: '#1e293b', // Landmass color
+                        fillOpacity: 1,
+                        color: '#334155',     // Country border stroke
+                        weight: 0.8
+                    }
+                }).addTo(map);
+            })
+            .catch(err => console.error("Could not load local world map:", err));
+
+        let eventSource = null;
+        let routeCoordinates = [];
+        let routeLine = null;
+        let markers = [];
+
+        function resetState() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            routeCoordinates = [];
+            markers.forEach(m => map.removeLayer(m));
+            markers = [];
+            if (routeLine) {
+                map.removeLayer(routeLine);
+                routeLine = null;
+            }
+            document.getElementById('hopsBody').innerHTML = '';
+        }
+
+        function startTrace() {
+            const target = document.getElementById('targetInput').value.trim();
+            if (!target) return;
+
+            resetState();
+            const btn = document.getElementById('traceBtn');
+            const status = document.getElementById('status');
+            btn.disabled = true;
+            status.textContent = 'Tracing hops...';
+
+            routeLine = L.polyline([], {
+                color: '#38bdf8',
+                weight: 2.5,
+                opacity: 0.9,
+                dashArray: '5, 8'
+            }).addTo(map);
+
+            eventSource = new EventSource(`/api/trace?target=${encodeURIComponent(target)}`);
+
+            eventSource.onmessage = function(event) {
+                const hop = JSON.parse(event.data);
+                appendHopRow(hop);
+
+                if (hop.lat != null && hop.lon != null) {
+                    const latLng = [hop.lat, hop.lon];
+                    routeCoordinates.push(latLng);
+                    routeLine.setLatLngs(routeCoordinates);
+
+                    const isOrigin = hop.ttl === 0;
+                    const markerIcon = L.divIcon({
+                        className: `hop-marker ${isOrigin ? 'origin' : ''}`,
+                        html: `<span>${hop.ttl}</span>`,
+                        iconSize: [22, 22],
+                        iconAnchor: [11, 11]
+                    });
+
+                    const locationText = [hop.city, hop.country].filter(Boolean).join(', ');
+                    const marker = L.marker(latLng, { icon: markerIcon })
+                        .bindPopup(`<b>Hop ${hop.ttl}: ${hop.ip}</b><br>${hop.host ? hop.host + '<br>' : ''}${locationText}`)
+                        .addTo(map);
+
+                    markers.push(marker);
+
+                    if (routeCoordinates.length > 1) {
+                        map.fitBounds(routeLine.getBounds(), { padding: [40, 40], maxZoom: 6 });
+                    }
+                }
+            };
+
+            eventSource.addEventListener('done', function(e) {
+                status.textContent = 'Trace completed.';
+                btn.disabled = false;
+                eventSource.close();
+            });
+
+            eventSource.addEventListener('error', function(e) {
+                status.textContent = 'Trace finished or connection closed.';
+                btn.disabled = false;
+                eventSource.close();
+            });
+        }
+
+        function appendHopRow(hop) {
+            const tbody = document.getElementById('hopsBody');
+            const tr = document.createElement('tr');
+
+            const rttStr = hop.rtt_ms !== null ? `${hop.rtt_ms.toFixed(1)} ms` : '*';
+            const locStr = (hop.lat && hop.lon) 
+                ? `${hop.city || ''}, ${hop.country || ''}` 
+                : (!hop.is_public && hop.ip !== '*' ? 'Private Net' : '-');
+
+            let hopBadge = `<span class="badge">${hop.ttl}</span>`;
+            if (hop.ttl === 0) hopBadge = `<span class="badge origin">Origin</span>`;
+
+            tr.innerHTML = `
+                <td>${hopBadge}</td>
+                <td><strong>${hop.ip}</strong></td>
+                <td style="color:#94a3b8">${hop.host || '-'}</td>
+                <td style="color:${hop.rtt_ms > 150 ? '#f87171' : '#4ade80'}">${rttStr}</td>
+                <td>${locStr}</td>
+            `;
+            tbody.appendChild(tr);
+            tr.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+    </script>
+</body>
+</html>
